@@ -113,22 +113,25 @@ async function tryAutoZone() {
   }
 }
 
+const PRESET_NAMES = ['Skyrock Klassiks', 'Skyrock', 'ADO', 'Génération', "Moov'", 'Chérie FM'];
+
+const BT_STREAMS = [
+  { name: 'Skyrock Klassiks', url: 'http://icecast.skyrock.net/s/klassiks_aac_128k' },
+  { name: 'Skyrock',          url: 'http://icecast.skyrock.net/s/natio_aac_128k' },
+  { name: 'ADO FM',           url: 'http://start-adofm.ice.infomaniak.ch/start-adofm-high.mp3' },
+  { name: 'Génération',       url: 'https://generation.ice.infomaniak.ch/generation-high.mp3' },
+  { name: "Moov'",            url: 'https://moov.ice.infomaniak.ch/moov-high.mp3' },
+  { name: 'Chérie FM',        url: 'https://cherie.ice.infomaniak.ch/cherie-high.mp3' },
+];
+
 const CLIENT_JS = `
-const audio = document.getElementById('audio');
-audio.volume = 1;
-let zoneActive = false;
-let drawerOpen = false;
-let toastTimer;
-let scanTimer = null;
+let toastTimer, scanTimer = null, pollingTimer = null;
+let zoneActive = false, drawerOpen = false, currentPreset = null;
 let btMode = false;
 
-const DEFAULT_PRESETS = ${JSON.stringify(DEFAULT_PRESETS)};
-
-function loadPresets() {
-  try { const s = localStorage.getItem('bose_presets'); return s ? JSON.parse(s) : DEFAULT_PRESETS; }
-  catch(e) { return DEFAULT_PRESETS; }
-}
-function savePresetsToStorage(p) { localStorage.setItem('bose_presets', JSON.stringify(p)); }
+const audio = document.getElementById('audio');
+const PRESET_NAMES = ${JSON.stringify(PRESET_NAMES)};
+const BT_STREAMS = ${JSON.stringify(BT_STREAMS)};
 
 function toast(msg) {
   const el = document.getElementById('toast');
@@ -136,129 +139,111 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
 }
-
-async function api(spId, method, path, body) {
-  const o = { method, headers: { 'Content-Type': 'application/xml' } };
-  if (body) o.body = body;
-  const r = await fetch('/bose/' + spId + path, o);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.text();
-}
 function px(t) { return new DOMParser().parseFromString(t, 'text/xml'); }
 
-// ── Modes ──
-let currentScreen = 'offline';
-
-function showScreen(name) {
-  currentScreen = name;
-  document.getElementById('screenMain').style.display = name === 'main' ? 'block' : 'none';
-  document.getElementById('screenOffline').style.display = name === 'offline' ? 'block' : 'none';
-  document.getElementById('screenBT').style.display = name === 'bt' ? 'block' : 'none';
-  if (name === 'offline') startScan();
-  if (name === 'bt') btMode = true;
-  else btMode = false;
-}
-
-function showBT() { showScreen('bt'); }
-function exitBT() { stopRadio(); showScreen('offline'); }
-
-// ── Auto scan ──
+// ── Scan ──
 function startScan() {
   stopScan();
-  const el = document.getElementById('scanStatus');
-  if (el) el.textContent = 'Recherche en cours...';
   scanTimer = setInterval(checkSpeakers, 5000);
   checkSpeakers();
 }
-
-function stopScan() {
-  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
-}
+function stopScan() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } }
 
 async function checkSpeakers() {
   try {
-    const r = await fetch('/scan');
-    const data = await r.json();
+    const data = await fetch('/scan').then(r => r.json());
     if (data.count >= 1) {
       stopScan();
-      zoneActive = false;
-      // Update IPs dynamically
       if (data.sp1) window._SPS[0].ip = data.sp1;
       if (data.sp2) window._SPS[1].ip = data.sp2;
-      currentScreen = 'main';
-      document.getElementById('screenMain').style.display = 'block';
-      document.getElementById('screenOffline').style.display = 'none';
-      document.getElementById('screenBT').style.display = 'none';
-      updateZoneUI();
-      refreshSpeakers();
+      updateZoneUI(data);
+      updateStatusDot(data.count);
+      renderGrids();
+      startPolling();
       toast(data.count === 2 ? '2 enceintes connectées' : '1 enceinte connectée');
-    } else {
-      const el = document.getElementById('scanStatus');
-      if (el) el.textContent = 'Aucune enceinte — nouvelle tentative dans 5s...';
     }
-  } catch(e) {
-    const el = document.getElementById('scanStatus');
-    if (el) el.textContent = 'Erreur réseau...';
-  }
+  } catch(e) {}
 }
 
-function updateZoneUI() {
+function updateStatusDot(count) {
+  document.getElementById('gDot').className = count >= 1 ? 'sdot ok' : 'sdot err';
+  document.getElementById('gSt').textContent = count === 2 ? '2 enceintes connectées' : count === 1 ? '1 enceinte connectée' : 'Enceintes non joignables';
+}
+
+function updateZoneUI(data) {
   const card = document.getElementById('zoneCard');
-  const btn = document.getElementById('zoneBtn');
-  const state = document.getElementById('zoneState');
   const sp2Row = document.getElementById('sp2Row');
-  if (window._SPS[1].ip === '?') {
-    card && (card.style.display = 'none');
-    sp2Row && (sp2Row.style.display = 'none');
-    return;
-  }
-  card && card.classList.add('show');
-  if (zoneActive) {
-    btn && (btn.textContent = 'Dissoudre');
-    btn && btn.classList.add('on');
-    state && (state.textContent = 'Actif');
-  }
+  if (!data.sp2) { card && (card.style.display='none'); sp2Row && (sp2Row.style.display='none'); return; }
+  card && (card.style.display='flex');
 }
 
-async function refreshSP(sp) {
+// ── Grilles ──
+function renderGrids() {
+  ['wifi','bt'].forEach(mode => {
+    const grid = document.getElementById('rgrid-' + mode);
+    if (!grid) return;
+    grid.innerHTML = '';
+    PRESET_NAMES.forEach((name, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'rtile';
+      tile.id = 'tile-' + mode + '-' + (i+1);
+      tile.innerHTML = '<div class="ta">' + (i+1) + '</div><div class="tn">' + name + '</div>';
+      tile.onclick = () => mode === 'wifi' ? playWifi(i+1) : playBT(i);
+      grid.appendChild(tile);
+    });
+  });
+}
+
+// ── Player unique ──
+function setPlayerStation(name) {
+  document.getElementById('pStation').textContent = name || '—';
+}
+function setPlayerLive(text, on) {
+  const el = document.getElementById('pLive');
+  el.textContent = text;
+  el.className = 'player-live' + (on ? ' on' : '');
+}
+function setViz(on) {
+  document.getElementById('viz').classList.toggle('go', on);
+}
+function setPlayBtn(playing) {
+  const btn = document.getElementById('playBtn');
+  btn.textContent = playing ? '⏸' : '▶';
+  btn.classList.toggle('on', playing);
+}
+
+// ── Wi-Fi ──
+async function playWifi(id) {
+  btMode = false;
+  // Stop BT si en cours
+  if (!audio.paused) { audio.pause(); audio.src = ''; }
+  document.querySelectorAll('#rgrid-bt .rtile').forEach(t => t.classList.remove('on'));
   try {
-    await api(sp.id, 'GET', '/info');
-    const np = px(await api(sp.id, 'GET', '/now_playing'));
-    const src = np.querySelector('ContentItem')?.getAttribute('source') || '';
-    const ps = np.querySelector('playStatus')?.textContent || '';
-    const b = document.getElementById('b-' + sp.id);
-    if (!b) return true;
-    if (src === 'STANDBY') { b.textContent = 'Veille'; b.className = 'dbadge'; }
-    else if (ps === 'PLAY_STATE') { b.textContent = 'Lecture'; b.className = 'dbadge on'; }
-    else { b.textContent = 'Connecté'; b.className = 'dbadge on'; }
-    return true;
-  } catch(e) {
-    const b = document.getElementById('b-' + sp.id);
-    if (b) { b.textContent = 'Hors ligne'; b.className = 'dbadge'; }
-    return false;
-  }
+    await fetch('/playpreset?sp=sp1&id=' + id);
+    currentPreset = id;
+    document.querySelectorAll('#rgrid-wifi .rtile').forEach(t => t.classList.remove('on'));
+    document.getElementById('tile-wifi-' + id)?.classList.add('on');
+    setPlayerStation(PRESET_NAMES[id-1]);
+    setPlayerLive('Connexion...', false);
+    toast(PRESET_NAMES[id-1]);
+    setTimeout(pollNowPlaying, 1500);
+  } catch(e) { toast('Erreur preset'); }
 }
 
-async function refreshSpeakers() {
-  if (btMode) return;
-  const SPS = window._SPS;
-  const dot = document.getElementById('gDot');
-  const s = document.getElementById('gSt');
-  const results = await Promise.all(SPS.map(refreshSP));
-  const ok = results.filter(Boolean).length;
-  if (ok >= 1) {
-    dot.className = 'sdot ok';
-    s.textContent = ok === 2 ? '2 enceintes connectées' : '1 enceinte connectée';
-  } else {
-    dot.className = 'sdot err';
-    s.textContent = 'Enceintes non joignables';
-    if (currentScreen === 'main') showScreen('offline');
-  }
+async function boseKey(id, k) {
+  await fetch('/bose/'+id+'/key', {method:'POST',headers:{'Content-Type':'application/xml'},body:'<key state="press" sender="Gabbo">'+k+'</key>'}).catch(()=>{});
+  await fetch('/bose/'+id+'/key', {method:'POST',headers:{'Content-Type':'application/xml'},body:'<key state="release" sender="Gabbo">'+k+'</key>'}).catch(()=>{});
+  setTimeout(pollNowPlaying, 800);
 }
 
-async function refreshAll() {
-  if (btMode || currentScreen !== 'main') return;
-  await refreshSpeakers();
+async function setGroupVol(val) {
+  document.getElementById('vvg').textContent = val;
+  await Promise.all(window._SPS.map(sp => fetch('/bose/'+sp.id+'/volume',{method:'POST',headers:{'Content-Type':'application/xml'},body:'<volume>'+val+'</volume>'}).catch(()=>{})));
+}
+
+async function setBass(val) {
+  document.getElementById('vvb').textContent = val;
+  await Promise.all(window._SPS.map(sp => fetch('/bose/'+sp.id+'/bass',{method:'POST',headers:{'Content-Type':'application/xml'},body:'<bass>'+val+'</bass>'}).catch(()=>{})));
 }
 
 async function toggleZone() {
@@ -266,213 +251,112 @@ async function toggleZone() {
   const state = document.getElementById('zoneState');
   btn.textContent = '...';
   if (!zoneActive) {
-    try {
-      const r = await fetch('/createzone');
-      if (!r.ok) throw new Error(await r.text());
-      zoneActive = true; btn.textContent = 'Dissoudre'; btn.classList.add('on');
-      state.textContent = 'Actif'; toast('Enceintes jumelées');
-    } catch(e) { btn.textContent = 'Jumeler'; toast('Erreur jumelage'); }
+    await fetch('/createzone').catch(()=>{});
+    zoneActive = true; btn.textContent = 'Dissoudre'; btn.classList.add('on'); state.textContent = 'Actif'; toast('Enceintes jumelées');
   } else {
-    try {
-      const r = await fetch('/removezone');
-      if (!r.ok) throw new Error(await r.text());
-      zoneActive = false; btn.textContent = 'Jumeler'; btn.classList.remove('on');
-      state.textContent = 'Disponible'; toast('Zone dissoute');
-    } catch(e) { btn.textContent = 'Dissoudre'; toast('Erreur dissolution'); }
+    await fetch('/removezone').catch(()=>{});
+    zoneActive = false; btn.textContent = 'Jumeler'; btn.classList.remove('on'); state.textContent = 'Disponible'; toast('Zone dissoute');
   }
 }
 
-function renderRadios() {
-  const presets = loadPresets();
-  ['rgrid','rgridBT'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = presets.map((r, i) =>
-      '<div class="rtile' + (!r.url ? ' empty' : '') + '" id="' + id + '-' + i + '" onclick="' + (r.url ? 'selectPreset(' + i + ')' : 'openConfig()') + '">' +
-      '<div class="ta">' + (i + 1) + '</div>' +
-      '<div class="tn">' + (r.name || '—') + '</div>' +
-      '</div>'
-    ).join('');
-  });
-}
+// ── Polling Wi-Fi ──
+function startPolling() { if (pollingTimer) clearInterval(pollingTimer); pollingTimer = setInterval(pollNowPlaying, 8000); }
 
-function selectPreset(idx) {
-  const presets = loadPresets();
-  const r = presets[idx];
-  if (!r || !r.url) { openConfig(); return; }
-  document.querySelectorAll('.rtile').forEach(t => t.classList.remove('on'));
-  document.querySelectorAll('#rgrid-' + idx + ', #rgridBT-' + idx).forEach(t => t.classList.add('on'));
-  document.getElementById('pStation').textContent = r.name || ('Preset ' + (idx + 1));
-  const btStation = document.getElementById('pStationBT');
-  if (btStation) btStation.textContent = r.name || ('Preset ' + (idx + 1));
-  document.getElementById('pLive').textContent = 'Connexion...';
-  document.getElementById('pLive').className = 'player-live';
-  audio.src = r.url;
-  audio.play().then(() => {
-    document.getElementById('pLive').textContent = '● En direct';
-    document.getElementById('pLive').className = 'player-live on';
-    document.getElementById('playBtn').textContent = '⏸';
-    document.getElementById('playBtn').classList.add('on');
-    document.getElementById('viz').classList.add('go');
-    const btLive = document.getElementById('pLiveBT');
-    if (btLive) { btLive.textContent = '● En direct'; btLive.className = 'player-live on'; }
-    const btBtn = document.getElementById('playBtnBT');
-    if (btBtn) { btBtn.textContent = '⏸'; btBtn.classList.add('on'); }
-  }).catch(() => {
-    document.getElementById('pLive').textContent = 'Flux indisponible';
-    toast('Flux indisponible');
-  });
-}
-
-function togglePlay() {
-  if (!audio.src || audio.src === window.location.href) { toast('Sélectionne une station'); return; }
-  if (audio.paused) {
-    audio.play().then(() => {
-      ['playBtn','playBtnBT'].forEach(id => { const b=document.getElementById(id); if(b){b.textContent='⏸';b.classList.add('on');} });
-      document.getElementById('pLive').textContent = '● En direct';
-      document.getElementById('pLive').className = 'player-live on';
-      document.getElementById('viz').classList.add('go');
-    });
-  } else {
-    audio.pause();
-    ['playBtn','playBtnBT'].forEach(id => { const b=document.getElementById(id); if(b){b.textContent='▶';b.classList.remove('on');} });
-    document.getElementById('pLive').textContent = 'En pause';
-    document.getElementById('pLive').className = 'player-live';
-    document.getElementById('viz').classList.remove('go');
-  }
-}
-
-function stopRadio() {
-  audio.pause(); audio.src = '';
-  document.querySelectorAll('.rtile').forEach(t => t.classList.remove('on'));
-  ['pStation','pStationBT'].forEach(id => { const el=document.getElementById(id); if(el) el.textContent='—'; });
-  ['pLive','pLiveBT'].forEach(id => { const el=document.getElementById(id); if(el){el.textContent='Sélectionner une station';el.className='player-live';} });
-  ['playBtn','playBtnBT'].forEach(id => { const b=document.getElementById(id); if(b){b.textContent='▶';b.classList.remove('on');} });
-  document.getElementById('viz').classList.remove('go');
-}
-
-async function setGroupVol(val) {
-  document.getElementById('vvg').textContent = val;
-  const SPS = window._SPS;
-  await Promise.all(SPS.map(sp => api(sp.id, 'POST', '/volume', '<volume>' + val + '</volume>').catch(() => {})));
-}
-
-async function boseKey(id, k) {
+async function pollNowPlaying() {
+  if (btMode) return;
   try {
-    await api(id, 'POST', '/key', '<key state="press" sender="Gabbo">' + k + '</key>');
-    await api(id, 'POST', '/key', '<key state="release" sender="Gabbo">' + k + '</key>');
-    setTimeout(refreshAll, 800);
+    const xml = await fetch('/bose/sp1/now_playing').then(r => r.text());
+    const doc = px(xml);
+    const src = doc.querySelector('ContentItem')?.getAttribute('source') || '';
+    const ps = doc.querySelector('playStatus')?.textContent || '';
+    const presetId = doc.querySelector('ContentItem')?.getAttribute('presetid');
+    const art = doc.querySelector('art')?.textContent || '';
+
+    if (presetId) {
+      const pid = parseInt(presetId);
+      if (pid !== currentPreset) {
+        currentPreset = pid;
+        document.querySelectorAll('#rgrid-wifi .rtile').forEach(t => t.classList.remove('on'));
+        document.getElementById('tile-wifi-' + pid)?.classList.add('on');
+        setPlayerStation(PRESET_NAMES[pid-1] || 'Preset ' + pid);
+      }
+    }
+
+    if (src === 'STANDBY') { setPlayerLive('En veille', false); setViz(false); setPlayBtn(false); }
+    else if (ps === 'PLAY_STATE') { setPlayerLive('● En direct', true); setViz(true); setPlayBtn(true); }
+    else { setPlayerLive('Connecté', false); }
+
+    const artEl = document.getElementById('artImg');
+    if (art && art.startsWith('http')) { artEl.src = art; artEl.style.display = 'block'; } else { artEl.style.display = 'none'; }
   } catch(e) {}
 }
 
+// ── BT ──
+function playBT(idx) {
+  btMode = true;
+  const s = BT_STREAMS[idx];
+  document.querySelectorAll('#rgrid-wifi .rtile').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('#rgrid-bt .rtile').forEach(t => t.classList.remove('on'));
+  document.getElementById('tile-bt-' + (idx+1))?.classList.add('on');
+  setPlayerStation(s.name);
+  setPlayerLive('Connexion...', false);
+  audio.src = s.url;
+  audio.play().then(() => {
+    setPlayerLive('● En direct (BT)', true);
+    setViz(true);
+    setPlayBtn(true);
+  }).catch(() => { setPlayerLive('Flux indisponible', false); });
+}
+
+function togglePlay() {
+  if (btMode) {
+    if (!audio.src || audio.src === window.location.href) { toast('Sélectionne une station BT'); return; }
+    if (audio.paused) {
+      audio.play().then(() => { setPlayerLive('● En direct (BT)', true); setViz(true); setPlayBtn(true); });
+    } else {
+      audio.pause();
+      setPlayerLive('En pause', false); setViz(false); setPlayBtn(false);
+    }
+  } else {
+    boseKey('sp1', 'PLAY_PAUSE');
+  }
+}
+
+function stopAll() {
+  if (btMode) { audio.pause(); audio.src = ''; btMode = false; }
+  else { boseKey('sp1', 'STOP'); }
+  document.querySelectorAll('.rtile').forEach(t => t.classList.remove('on'));
+  setPlayerStation('—'); setPlayerLive('Sélectionner une station', false); setViz(false); setPlayBtn(false);
+}
+
+// ── Drawer ──
 function toggleDrawer() {
   drawerOpen = !drawerOpen;
   document.getElementById('drawer').classList.toggle('open', drawerOpen);
   document.getElementById('dArrow').classList.toggle('open', drawerOpen);
-  if (drawerOpen) { refreshAll(); loadBosePresets(); }
+  if (drawerOpen) refreshSpeakerStatus();
 }
 
-async function loadBosePresets() {
-  const container = document.getElementById('bosePresets');
-  if (!container) return;
-  container.innerHTML = '<div style="font-size:.6rem;color:var(--smoke)"><span class="spin"></span> Chargement...</div>';
-  try {
-    const r = await fetch('/presets');
-    const xml = await r.text();
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    const presets = doc.querySelectorAll('preset');
-    const presetData = [];
-    presets.forEach(p => {
-      const id = p.getAttribute('id');
-      const name = p.querySelector('itemName')?.textContent || '';
-      const source = p.querySelector('ContentItem')?.getAttribute('source') || '';
-      const location = p.querySelector('ContentItem')?.getAttribute('location') || '';
-      presetData.push({ id, name, source, location });
-    });
-    // Fill missing presets
-    for (let i = 1; i <= 6; i++) {
-      if (!presetData.find(p => p.id == i)) presetData.push({ id: String(i), name: '', source: '', location: '' });
-    }
-    presetData.sort((a, b) => a.id - b.id);
-    container.innerHTML = presetData.map(p => {
-      const isCloud = p.source === 'TUNEIN' || p.source === 'SPOTIFY';
-      const warn = isCloud ? '<span style="color:var(--terra);font-size:.5rem"> ⚠ cloud</span>' : '';
-      return '<div style="margin-bottom:10px;padding:10px;background:var(--paper);border-radius:4px;border:1px solid rgba(197,191,181,.3)">' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
-        '<div class="preset-num">' + p.id + '</div>' +
-        '<div style="flex:1;font-size:.68rem;color:var(--ink)">' + (p.name || '—') + warn + '</div>' +
-        '<button onclick="playBosePreset(' + p.id + ')" style="padding:4px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;font-family:Montserrat,sans-serif;border-radius:1px">▶</button>' +
-        '</div>' +
-        '<input type="text" id="pname-' + p.id + '" value="' + (p.name||'') + '" placeholder="Nom" style="width:100%;padding:6px 8px;border:1px solid var(--stone);background:var(--white);font-family:Montserrat,sans-serif;font-size:.62rem;outline:none;border-radius:1px;margin-bottom:4px">' +
-        '<div style="display:flex;gap:4px">' +
-        '<input type="url" id="purl-' + p.id + '" value="' + (isCloud ? '' : p.location) + '" placeholder="URL du flux direct (http://...)" style="flex:1;padding:6px 8px;border:1px solid var(--stone);background:var(--white);font-family:Montserrat,sans-serif;font-size:.58rem;outline:none;border-radius:1px">' +
-        '<button onclick="savePreset(' + p.id + ')" style="padding:6px 12px;background:var(--ink);color:var(--white);border:none;cursor:pointer;font-size:.55rem;font-family:Montserrat,sans-serif;border-radius:1px;white-space:nowrap">✓ Sauver</button>' +
-        '</div>' +
-        '</div>';
-    }).join('');
-  } catch(e) {
-    container.innerHTML = '<div style="font-size:.62rem;color:var(--terra)">Erreur: ' + e.message + '</div>';
+async function refreshSpeakerStatus() {
+  for (const sp of window._SPS) {
+    const b = document.getElementById('b-' + sp.id);
+    if (!b) continue;
+    try {
+      const xml = await fetch('/bose/' + sp.id + '/now_playing').then(r => r.text());
+      const doc = px(xml);
+      const src = doc.querySelector('ContentItem')?.getAttribute('source') || '';
+      const ps = doc.querySelector('playStatus')?.textContent || '';
+      if (src === 'STANDBY') { b.textContent = 'Veille'; b.className = 'dbadge'; }
+      else if (ps === 'PLAY_STATE') { b.textContent = 'Lecture'; b.className = 'dbadge on'; }
+      else { b.textContent = 'Connecté'; b.className = 'dbadge on'; }
+    } catch(e) { b.textContent = 'Hors ligne'; b.className = 'dbadge'; }
   }
-}
-
-async function savePreset(id) {
-  const name = document.getElementById('pname-' + id)?.value.trim() || 'Radio ' + id;
-  const url = document.getElementById('purl-' + id)?.value.trim() || '';
-  if (!url) { toast('URL manquante pour le preset ' + id); return; }
-  try {
-    const r = await fetch('/setpreset?id=' + id + '&name=' + encodeURIComponent(name) + '&url=' + encodeURIComponent(url));
-    if (!r.ok) throw new Error(await r.text());
-    toast('Preset ' + id + ' sauvegardé sur les 2 enceintes !');
-    setTimeout(loadBosePresets, 500);
-  } catch(e) {
-    toast('Erreur: ' + e.message);
-  }
-}
-
-async function playBosePreset(id) {
-  try {
-    const r = await fetch('/playpreset?sp=sp1&id=' + id);
-    if (!r.ok) throw new Error(await r.text());
-    toast('Preset ' + id + ' lancé');
-    setTimeout(refreshAll, 1500);
-  } catch(e) {
-    toast('Erreur preset');
-  }
-}
-
-function openConfig() {
-  const presets = loadPresets();
-  document.getElementById('cfgList').innerHTML = presets.map((r, i) =>
-    '<div style="margin-bottom:14px">' +
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
-    '<div style="width:22px;height:22px;background:var(--ink);color:var(--white);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.6rem;flex-shrink:0">' + (i+1) + '</div>' +
-    '<input type="text" id="cfg-name-' + i + '" value="' + (r.name||'') + '" placeholder="Nom de la station" style="flex:1;padding:8px 12px;border:1px solid var(--stone);background:var(--white);font-family:Montserrat,sans-serif;font-size:.68rem;color:var(--ink);outline:none;border-radius:1px">' +
-    '</div>' +
-    '<input type="url" id="cfg-url-' + i + '" value="' + (r.url||'') + '" placeholder="URL du flux (http://...)" style="width:100%;padding:8px 12px;border:1px solid var(--stone);background:var(--white);font-family:Montserrat,sans-serif;font-size:.6rem;color:var(--smoke);outline:none;border-radius:1px">' +
-    '</div>'
-  ).join('');
-  document.getElementById('cfgOverlay').style.display = 'block';
-}
-
-function closeConfig() { document.getElementById('cfgOverlay').style.display = 'none'; }
-
-function saveConfig() {
-  const presets = [];
-  for (let i = 0; i < 8; i++) {
-    const name = (document.getElementById('cfg-name-' + i)?.value || '').trim();
-    const url = (document.getElementById('cfg-url-' + i)?.value || '').trim();
-    presets.push({ name, url });
-  }
-  savePresetsToStorage(presets);
-  renderRadios();
-  closeConfig();
-  toast('Stations enregistrées');
 }
 
 // ── Init ──
-renderRadios();
-checkSpeakers();
-setInterval(() => { if (!btMode) refreshAll(); }, 20000);
+renderGrids();
+startScan();
+setInterval(pollNowPlaying, 20000);
 `;
 
 function buildHTML() {
@@ -487,7 +371,6 @@ function buildHTML() {
 <title>MyBose</title>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="MyBose">
 <meta name="theme-color" content="#f4f1ed">
 <link rel="icon" type="image/png" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">
@@ -497,32 +380,26 @@ function buildHTML() {
 :root{--ink:#0e0e0e;--paper:#f4f1ed;--stone:#c5bfb5;--smoke:#8a8178;--gold:#b8996a;--gold-l:#d4b98a;--warm:#e8e2da;--white:#faf8f5;--terra:#c4714a}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{background:var(--paper);color:var(--ink);font-family:'Montserrat',sans-serif;font-weight:300}
-.wrap{max-width:480px;margin:0 auto}
-.screen{display:none}
-/* Header */
+.wrap{max-width:480px;margin:0 auto;padding-bottom:40px}
 .hdr{padding:36px 24px 0;display:flex;align-items:flex-end;justify-content:space-between}
-.hdr-left{position:relative;display:inline-block}
-.hdr-my{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:300;font-size:1rem;letter-spacing:.1em;color:var(--smoke);line-height:1;padding-left:2px}
+.hdr-my{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:300;font-size:1rem;letter-spacing:.1em;color:var(--smoke);line-height:1}
 .hdr-brand{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:2rem;letter-spacing:.28em;text-transform:uppercase;line-height:1}
-.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px;text-align:right}
+.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px}
 .hdr-tagline{font-size:.52rem;letter-spacing:.18em;text-transform:uppercase;color:var(--terra);text-align:right;line-height:1.6;max-width:160px}
 .hdr-line{height:1px;background:linear-gradient(90deg,var(--ink) 0%,var(--gold) 60%,transparent 100%);margin:12px 24px 20px}
-/* Status */
 .status{display:flex;align-items:center;gap:7px;padding:0 24px 18px;font-size:.58rem;letter-spacing:.2em;text-transform:uppercase;color:var(--smoke)}
 .sdot{width:5px;height:5px;border-radius:50%;background:var(--stone);transition:all .4s;flex-shrink:0}
 .sdot.ok{background:var(--gold);box-shadow:0 0 8px var(--gold-l)}
 .sdot.err{background:var(--terra)}
-/* Zone */
-.zone-card{margin:0 20px 20px;border:1px solid var(--gold);border-radius:2px;padding:14px 18px;background:linear-gradient(135deg,rgba(184,153,106,.07),transparent);display:flex;align-items:center;justify-content:space-between;gap:14px;opacity:0;transform:translateY(-6px);transition:all .35s;pointer-events:none}
-.zone-card.show{opacity:1;transform:translateY(0);pointer-events:all}
+.zone-card{margin:0 20px 20px;border:1px solid var(--gold);border-radius:2px;padding:14px 18px;background:linear-gradient(135deg,rgba(184,153,106,.07),transparent);display:flex;align-items:center;justify-content:space-between;gap:14px}
 .zone-info-label{font-size:.6rem;letter-spacing:.22em;text-transform:uppercase;color:var(--gold)}
 .zone-info-state{font-size:.72rem;font-weight:400;color:var(--ink);margin-top:3px}
 .zone-toggle{flex-shrink:0;padding:9px 18px;border:1px solid var(--gold);background:transparent;color:var(--gold);font-family:'Montserrat',sans-serif;font-size:.58rem;font-weight:300;letter-spacing:.2em;text-transform:uppercase;cursor:pointer;border-radius:1px;transition:all .2s}
 .zone-toggle:active,.zone-toggle.on{background:var(--gold);color:var(--white)}
-/* Player */
-.player{margin:0 20px 22px;background:var(--white);border-radius:2px;box-shadow:0 1px 20px rgba(14,14,14,.07),0 0 0 1px rgba(197,191,181,.5);overflow:hidden}
+.player{margin:0 20px 16px;background:var(--white);border-radius:2px;box-shadow:0 1px 20px rgba(14,14,14,.07),0 0 0 1px rgba(197,191,181,.5);overflow:hidden}
 .player-top{padding:18px 20px 14px;display:flex;align-items:center;gap:14px;border-bottom:1px solid rgba(197,191,181,.35);min-height:68px}
-.player-station{font-family:'Cormorant Garamond',serif;font-size:1.5rem;font-weight:300;color:var(--ink);flex:1;line-height:1}
+.player-art{width:48px;height:48px;border-radius:2px;object-fit:cover;flex-shrink:0;display:none}
+.player-station{font-family:'Cormorant Garamond',serif;font-size:1.5rem;font-weight:300;color:var(--ink);flex:1;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .player-live{font-size:.54rem;letter-spacing:.25em;text-transform:uppercase;color:var(--smoke);display:block;margin-top:5px}
 .player-live.on{color:var(--terra)}
 .viz{display:flex;align-items:flex-end;gap:2px;height:18px;flex-shrink:0}
@@ -536,87 +413,53 @@ html,body{background:var(--paper);color:var(--ink);font-family:'Montserrat',sans
 .ctrl-row{display:flex;align-items:center;padding:12px 20px;gap:10px}
 .pbtn{width:42px;height:42px;border-radius:50%;border:1px solid var(--stone);background:transparent;cursor:pointer;font-size:.9rem;color:var(--ink);display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
 .pbtn:active{transform:scale(.92)}
-.pbtn.main{border-color:var(--ink);width:46px;height:46px}
-.pbtn.main.on{background:var(--ink);color:var(--white)}
-.vol-section{padding:0 20px 14px;display:flex;align-items:center;gap:12px}
+.pbtn.on{background:var(--ink);color:var(--white);border-color:var(--ink)}
+.vol-section{padding:0 20px 12px;display:flex;align-items:center;gap:12px}
 .vol-label{font-size:.55rem;letter-spacing:.22em;text-transform:uppercase;color:var(--smoke);width:60px;flex-shrink:0}
 input[type=range]{flex:1;-webkit-appearance:none;height:1px;background:var(--stone);outline:none}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--ink);cursor:pointer;border:2px solid var(--white);box-shadow:0 0 0 1px var(--stone)}
 .vol-val{font-size:.65rem;color:var(--smoke);width:28px;text-align:right}
-/* Grid */
-.grid-label{padding:0 20px 10px;font-size:.55rem;letter-spacing:.3em;text-transform:uppercase;color:var(--smoke);display:flex;align-items:center;justify-content:space-between}
-.cfg-btn{background:none;border:none;cursor:pointer;font-size:.55rem;letter-spacing:.2em;text-transform:uppercase;color:var(--terra);font-family:'Montserrat',sans-serif;padding:2px 0;font-weight:300}
-.rgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:rgba(197,191,181,.3);margin:0 20px 24px;border:1px solid rgba(197,191,181,.3);border-radius:2px;overflow:hidden}
-.rtile{background:var(--white);padding:13px 6px;text-align:center;cursor:pointer;transition:background .15s;position:relative}
+.section-sep{display:flex;align-items:center;gap:12px;margin:20px 20px 12px}
+.sep-label{font-size:.52rem;letter-spacing:.28em;text-transform:uppercase;white-space:nowrap;flex-shrink:0}
+.sep-label.wifi{color:var(--gold)}
+.sep-label.bt{color:var(--smoke)}
+.sep-line{flex:1;height:1px;background:rgba(197,191,181,.5)}
+.rgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:rgba(197,191,181,.3);margin:0 20px 8px;border:1px solid rgba(197,191,181,.3);border-radius:2px;overflow:hidden}
+.rtile{background:var(--white);padding:16px 6px;text-align:center;cursor:pointer;transition:background .15s;position:relative}
 .rtile::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:var(--terra);transform:scaleX(0);transition:transform .2s}
 .rtile:active{background:var(--warm)}
 .rtile.on{background:var(--ink)}
 .rtile.on::after{transform:scaleX(1)}
 .rtile.on .ta{color:var(--gold-l)}
 .rtile.on .tn{color:rgba(255,255,255,.6)}
-.rtile.empty .ta,.rtile.empty .tn{color:var(--stone)}
-.ta{font-family:'Cormorant Garamond',serif;font-size:1rem;font-weight:400;color:var(--ink);line-height:1;margin-bottom:3px}
-.tn{font-size:.47rem;letter-spacing:.08em;text-transform:uppercase;color:var(--smoke)}
-.preset-btn{background:var(--white);border:1px solid var(--stone);border-radius:8px;padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:all .15s;margin-bottom:6px}
-.preset-btn:active{background:var(--warm)}
-.preset-btn:hover{border-color:var(--gold)}
-.preset-num{width:24px;height:24px;background:var(--ink);color:var(--white);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.6rem;flex-shrink:0}
-.preset-name{font-size:.68rem;color:var(--ink)}
-/* Drawer */
-.drawer-toggle{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;cursor:pointer;border-top:1px solid rgba(197,191,181,.4);user-select:none}
+.ta{font-family:'Cormorant Garamond',serif;font-size:1.1rem;font-weight:400;color:var(--ink);line-height:1;margin-bottom:4px}
+.tn{font-size:.5rem;letter-spacing:.06em;text-transform:uppercase;color:var(--smoke)}
+.bt-note{font-size:.54rem;letter-spacing:.15em;text-transform:uppercase;color:var(--smoke);padding:2px 20px 14px;text-align:center}
+.drawer-toggle{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;cursor:pointer;border-top:1px solid rgba(197,191,181,.4);margin-top:8px;user-select:none}
 .drawer-label{font-size:.55rem;letter-spacing:.28em;text-transform:uppercase;color:var(--smoke)}
 .drawer-arrow{font-size:.8rem;color:var(--stone);transition:transform .3s}
 .drawer-arrow.open{transform:rotate(180deg)}
 .drawer{overflow:hidden;max-height:0;transition:max-height .35s ease;background:var(--white)}
-.drawer.open{max-height:500px}
+.drawer.open{max-height:300px}
 .drow{display:flex;align-items:center;padding:10px 24px;border-bottom:1px solid rgba(197,191,181,.25);gap:12px}
 .drow:last-child{border-bottom:none}
 .dlbl{font-size:.55rem;letter-spacing:.2em;text-transform:uppercase;color:var(--smoke);width:70px;flex-shrink:0}
 .dval{font-size:.65rem;color:var(--ink);flex:1}
 .dbadge{font-size:.52rem;padding:2px 8px;border:1px solid var(--stone);border-radius:20px;color:var(--smoke);letter-spacing:.08em}
 .dbadge.on{border-color:var(--gold);color:var(--gold)}
-/* Offline screen */
-.offline-wrap{padding:48px 24px;text-align:center}
-.offline-icon{font-size:3rem;margin-bottom:20px;opacity:.4}
-.offline-title{font-family:'Cormorant Garamond',serif;font-size:1.6rem;font-weight:300;letter-spacing:.1em;margin-bottom:8px}
-.offline-desc{font-size:.65rem;letter-spacing:.12em;color:var(--smoke);line-height:2;margin-bottom:28px}
-.offline-scan{font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:var(--terra);margin-bottom:32px}
-.offline-notice{background:var(--white);border:1px solid rgba(197,191,181,.5);border-radius:2px;padding:20px;text-align:left;margin-bottom:24px}
-.notice-title{font-size:.58rem;letter-spacing:.25em;text-transform:uppercase;color:var(--gold);margin-bottom:12px}
-.notice-step{font-size:.68rem;color:var(--ink);line-height:2.2;display:flex;gap:10px;align-items:flex-start}
-.notice-num{width:20px;height:20px;background:var(--ink);color:var(--white);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.55rem;flex-shrink:0;margin-top:3px}
-.btn-bt{width:100%;padding:14px;border:1px solid var(--terra);background:transparent;color:var(--terra);font-family:'Montserrat',sans-serif;font-size:.6rem;font-weight:300;letter-spacing:.3em;text-transform:uppercase;cursor:pointer;border-radius:1px}
-.btn-bt:active{background:var(--terra);color:var(--white)}
-/* BT screen */
-.bt-header{background:var(--ink);padding:20px 24px;display:flex;align-items:center;justify-content:space-between}
-.bt-title{font-family:'Cormorant Garamond',serif;font-size:1.2rem;font-weight:300;letter-spacing:.2em;text-transform:uppercase;color:var(--white)}
-.bt-badge{font-size:.52rem;letter-spacing:.2em;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:3px 10px;border-radius:20px}
-.btn-exit{background:none;border:1px solid rgba(255,255,255,.3);color:rgba(255,255,255,.7);font-family:'Montserrat',sans-serif;font-size:.55rem;letter-spacing:.15em;text-transform:uppercase;padding:6px 14px;cursor:pointer;border-radius:1px}
-/* Footer */
-.footer{text-align:center;padding:16px 24px 32px;font-size:.5rem;letter-spacing:.2em;text-transform:uppercase;color:var(--stone)}
-/* Toast */
+.footer{text-align:center;padding:16px 24px 16px;font-size:.5rem;letter-spacing:.2em;text-transform:uppercase;color:var(--stone)}
 .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(70px);background:var(--ink);color:var(--white);padding:10px 22px;border-radius:2px;font-size:.58rem;letter-spacing:.18em;text-transform:uppercase;transition:transform .3s cubic-bezier(.34,1.56,.64,1);pointer-events:none;white-space:nowrap;z-index:999}
 .toast.show{transform:translateX(-50%) translateY(0)}
-/* Config */
-#cfgOverlay{display:none;position:fixed;inset:0;background:var(--paper);z-index:500;overflow-y:auto}
-.cfg-wrap{max-width:480px;margin:0 auto;padding:32px 20px 60px}
-.cfg-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.cfg-title{font-family:'Cormorant Garamond',serif;font-size:1.6rem;font-weight:300;letter-spacing:.2em;text-transform:uppercase}
-.cfg-close{background:none;border:1px solid var(--stone);cursor:pointer;padding:7px 16px;font-family:'Montserrat',sans-serif;font-size:.55rem;letter-spacing:.2em;text-transform:uppercase;color:var(--smoke);border-radius:1px}
-.cfg-line{height:1px;background:linear-gradient(90deg,var(--ink),var(--gold),transparent);margin-bottom:20px}
-.cfg-hint{font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--smoke);margin-bottom:16px;line-height:1.8}
-.cfg-save{width:100%;margin-top:8px;padding:14px;background:var(--ink);color:var(--white);border:none;cursor:pointer;font-family:'Montserrat',sans-serif;font-size:.6rem;font-weight:300;letter-spacing:.3em;text-transform:uppercase;border-radius:1px}
 .spin{display:inline-block;width:7px;height:7px;border:1px solid var(--stone);border-top-color:var(--gold);border-radius:50%;animation:sp .8s linear infinite;vertical-align:middle}
 @keyframes sp{to{transform:rotate(360deg)}}
 @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 </style>
 </head>
 <body>
+<div class="wrap" style="animation:fadeUp .5s ease both">
 
-<!-- ══ MAIN SCREEN ══ -->
-<div class="wrap screen" id="screenMain" style="display:none;animation:fadeUp .5s ease both">
   <div class="hdr">
-    <div class="hdr-left">
+    <div>
       <div class="hdr-my">My</div>
       <div class="hdr-brand">Bose</div>
       <div class="hdr-by">byRK</div>
@@ -628,15 +471,20 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
     <div class="sdot" id="gDot"></div>
     <span id="gSt"><span class="spin"></span></span>
   </div>
-  <div class="zone-card" id="zoneCard">
+
+  <!-- Zone -->
+  <div class="zone-card" id="zoneCard" style="display:none">
     <div>
       <div class="zone-info-label">Jumelage Wi-Fi</div>
-      <div class="zone-info-state" id="zoneState">Actif</div>
+      <div class="zone-info-state" id="zoneState">Disponible</div>
     </div>
-    <button class="zone-toggle on" id="zoneBtn" onclick="toggleZone()">Dissoudre</button>
+    <button class="zone-toggle" id="zoneBtn" onclick="toggleZone()">Jumeler</button>
   </div>
+
+  <!-- ══ Player unique ══ -->
   <div class="player">
     <div class="player-top">
+      <img class="player-art" id="artImg" src="" alt="">
       <div style="flex:1;min-width:0">
         <div class="player-station" id="pStation">—</div>
         <span class="player-live" id="pLive">Sélectionner une station</span>
@@ -646,129 +494,66 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
       </div>
     </div>
     <div class="ctrl-row">
-      <button class="pbtn main" id="playBtn" onclick="togglePlay()">▶</button>
-      <button class="pbtn" onclick="stopRadio()">■</button>
+      <button class="pbtn" id="playBtn" onclick="togglePlay()">▶</button>
+      <button class="pbtn" onclick="stopAll()">■</button>
+      <button class="pbtn" onclick="boseKey('sp1','POWER')">⏻</button>
     </div>
     <div class="vol-section">
       <span class="vol-label">Volume</span>
       <input type="range" min="0" max="100" value="30" id="vg" oninput="setGroupVol(this.value)">
       <span class="vol-val" id="vvg">30</span>
     </div>
+    <div class="vol-section" style="padding-bottom:14px">
+      <span class="vol-label">Basses</span>
+      <input type="range" min="-9" max="0" value="0" id="vb" oninput="setBass(this.value)">
+      <span class="vol-val" id="vvb">0</span>
+    </div>
   </div>
-  <div class="grid-label">
-    <span>Stations</span>
-    <button class="cfg-btn" onclick="openConfig()">⚙ Configurer</button>
+
+  <!-- ══ Wi-Fi ══ -->
+  <div class="section-sep">
+    <div class="sep-line"></div>
+    <span class="sep-label wifi">⊕ Wi-Fi</span>
+    <div class="sep-line"></div>
   </div>
-  <div class="rgrid" id="rgrid"></div>
+  <div class="rgrid" id="rgrid-wifi"></div>
+
+  <!-- ══ Bluetooth ══ -->
+  <div class="section-sep" style="margin-top:16px">
+    <div class="sep-line"></div>
+    <span class="sep-label bt">◈ Bluetooth</span>
+    <div class="sep-line"></div>
+  </div>
+  <div class="rgrid" id="rgrid-bt"></div>
+  <div class="bt-note">Son diffusé via Bluetooth vers l'enceinte</div>
+
+  <!-- Drawer -->
   <div class="drawer-toggle" onclick="toggleDrawer()">
     <span class="drawer-label">Détails des enceintes</span>
     <span class="drawer-arrow" id="dArrow">›</span>
   </div>
   <div class="drawer" id="drawer">
     <div class="drow">
-      <span class="dlbl">Enceinte 1</span>
+      <span class="dlbl">Maison</span>
       <span class="dval" style="color:var(--gold);font-size:.6rem">${sp1}</span>
       <span class="dbadge" id="b-sp1">—</span>
     </div>
     <div class="drow" id="sp2Row">
-      <span class="dlbl">Enceinte 2</span>
+      <span class="dlbl">Dépendance</span>
       <span class="dval" style="color:var(--gold);font-size:.6rem">${sp2}</span>
       <span class="dbadge" id="b-sp2">—</span>
     </div>
     <div class="drow">
-      <span class="dlbl">Presets</span>
-      <div style="flex:1">
-        <div id="bosePresets" style="padding:4px 0"></div>
-        <button onclick="loadBosePresets()" style="margin-top:4px;padding:5px 12px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px;color:var(--smoke)">↺ Actualiser</button>
-      </div>
-    </div>
-    <div class="drow">
       <span class="dlbl">Contrôles</span>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button onclick="boseKey('sp1','PLAY_PAUSE')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏯ 1</button>
-        <button onclick="boseKey('sp2','PLAY_PAUSE')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏯ 2</button>
-        <button onclick="boseKey('sp1','POWER')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏻ 1</button>
-        <button onclick="boseKey('sp2','POWER')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏻ 2</button>
+        <button onclick="boseKey('sp1','PLAY_PAUSE')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏯ Maison</button>
+        <button onclick="boseKey('sp2','PLAY_PAUSE')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏯ Dép.</button>
+        <button onclick="boseKey('sp1','POWER')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏻ Maison</button>
+        <button onclick="boseKey('sp2','POWER')" style="padding:5px 10px;border:1px solid var(--stone);background:none;cursor:pointer;font-size:.55rem;letter-spacing:.1em;font-family:'Montserrat',sans-serif;border-radius:1px">⏻ Dép.</button>
       </div>
     </div>
   </div>
-  <div class="footer">MyBose · byRK · v4</div>
-</div>
-
-<!-- ══ OFFLINE SCREEN ══ -->
-<div class="wrap screen" id="screenOffline" style="display:block;animation:fadeUp .5s ease both">
-  <div class="hdr">
-    <div class="hdr-left">
-      <div class="hdr-my">My</div>
-      <div class="hdr-brand">Bose</div>
-      <div class="hdr-by">byRK</div>
-    </div>
-    <div class="hdr-tagline">L'alternative<br>à l'abandon du fabricant</div>
-  </div>
-  <div class="hdr-line"></div>
-  <div class="offline-wrap">
-    <div class="offline-icon">◎</div>
-    <div class="offline-title">Enceintes non détectées</div>
-    <div class="offline-desc">Recherche en cours sur le réseau Wi-Fi...</div>
-    <div class="offline-scan" id="scanStatus"><span class="spin"></span> Scan en cours...</div>
-    <div class="offline-notice">
-      <div class="notice-title">Connecter une enceinte au Wi-Fi</div>
-      <div class="notice-step"><div class="notice-num">1</div><span>Appuie simultanément sur <b>2 + Vol —</b> sur l'enceinte</span></div>
-      <div class="notice-step"><div class="notice-num">2</div><span>L'enceinte passe en mode configuration Wi-Fi</span></div>
-      <div class="notice-step"><div class="notice-num">3</div><span>Entre ton <b>SSID</b> et ton <b>mot de passe</b> Wi-Fi</span></div>
-      <div class="notice-step"><div class="notice-num">4</div><span>L'enceinte redémarre — cette page se met à jour automatiquement</span></div>
-    </div>
-    <button class="btn-bt" onclick="showBT()">◈ Mode Bluetooth — continuer sans Wi-Fi</button>
-  </div>
-</div>
-
-<!-- ══ BLUETOOTH SCREEN ══ -->
-<div class="wrap screen" id="screenBT">
-  <div class="bt-header">
-    <div class="bt-title">MyBose</div>
-    <div class="bt-badge">MODE BT</div>
-    <button class="btn-exit" onclick="exitBT()">✕ Quitter</button>
-  </div>
-  <div style="padding:16px 20px 0">
-    <div class="player">
-      <div class="player-top">
-        <div style="flex:1;min-width:0">
-          <div class="player-station" id="pStationBT">—</div>
-          <span class="player-live" id="pLiveBT">Sélectionner une station</span>
-        </div>
-        <div class="viz" id="vizBT">
-          <div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div><div class="vb"></div>
-        </div>
-      </div>
-      <div class="ctrl-row">
-        <button class="pbtn main" id="playBtnBT" onclick="togglePlay()">▶</button>
-        <button class="pbtn" onclick="stopRadio()">■</button>
-      </div>
-      <div style="padding:6px 20px 14px;font-size:.58rem;letter-spacing:.15em;text-transform:uppercase;color:var(--smoke)">
-        Son via Bluetooth → Enceinte Bose
-      </div>
-    </div>
-  </div>
-  <div class="grid-label" style="padding-top:4px">
-    <span>Stations</span>
-    <button class="cfg-btn" onclick="openConfig()">⚙ Configurer</button>
-  </div>
-  <div class="rgrid" id="rgridBT"></div>
-  <div class="footer">Mode Bluetooth · Enceintes Wi-Fi non disponibles</div>
-</div>
-
-<!-- Config overlay -->
-<div id="cfgOverlay">
-  <div class="cfg-wrap">
-    <div class="cfg-hdr">
-      <div class="cfg-title">Config</div>
-      <button class="cfg-close" onclick="closeConfig()">✕ Fermer</button>
-    </div>
-    <div class="cfg-line"></div>
-    <div class="cfg-hint">Nom et URL du flux pour chacun des 8 presets.</div>
-    <div id="cfgList"></div>
-    <button class="cfg-save" onclick="saveConfig()">Enregistrer</button>
-  </div>
+  <div class="footer">MyBose · byRK · v6</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -780,8 +565,6 @@ window._SPS = [{id:'sp1',ip:'${sp1}'},{id:'sp2',ip:'${sp2}'}];
 </body>
 </html>`;
 }
-
-
 const server = http.createServer((req, res) => {
   const path = req.url.split('?')[0];
 
