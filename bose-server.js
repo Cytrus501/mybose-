@@ -910,8 +910,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
-discoverSpeakers().then(() => {
-  server.listen(3000, '0.0.0.0', () => {
+server.listen(3000, '::', () => {
     const ifaces = os.networkInterfaces();
     let localIp = 'localhost';
     for (const n of Object.keys(ifaces)) {
@@ -920,5 +919,5 @@ discoverSpeakers().then(() => {
       }
     }
     console.log('\n  MyBose -> http://' + localIp + ':3000\n');
-  });
 });
+discoverSpeakers();
