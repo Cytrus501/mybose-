@@ -243,7 +243,8 @@ async function setGroupVol(val) {
 
 async function setBass(val) {
   document.getElementById('vvb').textContent = val;
-  await Promise.all(window._SPS.map(sp => fetch('/bose/'+sp.id+'/bass',{method:'POST',headers:{'Content-Type':'application/xml'},body:'<bass>'+val+'</bass>'}).catch(()=>{})));
+  const boseVal = Math.round((val / 10) * -9);
+  await Promise.all(window._SPS.map(sp => fetch('/bose/'+sp.id+'/bass',{method:'POST',headers:{'Content-Type':'application/xml'},body:'<bass>'+boseVal+'</bass>'}).catch(()=>{})));
 }
 
 async function toggleZone() {
@@ -505,7 +506,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
     </div>
     <div class="vol-section" style="padding-bottom:14px">
       <span class="vol-label">Basses</span>
-      <input type="range" min="-9" max="0" value="0" id="vb" oninput="setBass(this.value)">
+      <input type="range" min="0" max="10" value="0" id="vb" oninput="setBass(this.value)">
       <span class="vol-val" id="vvb">0</span>
     </div>
   </div>
