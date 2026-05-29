@@ -385,7 +385,7 @@ html,body{background:var(--paper);color:var(--ink);font-family:'Montserrat',sans
 .hdr{padding:36px 24px 0;display:flex;align-items:flex-end;justify-content:space-between}
 .hdr-my{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:300;font-size:1rem;letter-spacing:.1em;color:var(--smoke);line-height:1}
 .hdr-brand{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:2rem;letter-spacing:.28em;text-transform:uppercase;line-height:1}
-.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px}
+.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px;text-align:right}
 .hdr-tagline{font-size:.52rem;letter-spacing:.18em;text-transform:uppercase;color:var(--terra);text-align:right;line-height:1.6;max-width:160px}
 .hdr-line{height:1px;background:linear-gradient(90deg,var(--ink) 0%,var(--gold) 60%,transparent 100%);margin:12px 24px 20px}
 .status{display:flex;align-items:center;gap:7px;padding:0 24px 18px;font-size:.58rem;letter-spacing:.2em;text-transform:uppercase;color:var(--smoke)}
@@ -554,7 +554,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
       </div>
     </div>
   </div>
-  <div class="footer">MyBose · byRK · v6</div>
+  <div class="footer">MyBose · byRK · v7</div>
 </div>
 
 <div class="toast" id="toast"></div>
