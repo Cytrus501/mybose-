@@ -243,7 +243,7 @@ async function setGroupVol(val) {
 
 async function setBass(val) {
   document.getElementById('vvb').textContent = val;
-  const boseVal = Math.round((val / 10) * -9);
+  const boseVal = -Math.round((val / 10) * 9);
   await Promise.all(window._SPS.map(sp => fetch('/bose/'+sp.id+'/bass',{method:'POST',headers:{'Content-Type':'application/xml'},body:'<bass>'+boseVal+'</bass>'}).catch(()=>{})));
 }
 
@@ -261,7 +261,7 @@ async function toggleZone() {
 }
 
 // ── Polling Wi-Fi ──
-function startPolling() { if (pollingTimer) clearInterval(pollingTimer); pollingTimer = setInterval(pollNowPlaying, 8000); }
+function startPolling() { if (pollingTimer) clearInterval(pollingTimer); pollingTimer = setInterval(pollNowPlaying, 15000); }
 
 async function pollNowPlaying() {
   if (btMode) return;
@@ -357,7 +357,7 @@ async function refreshSpeakerStatus() {
 // ── Init ──
 renderGrids();
 startScan();
-setInterval(pollNowPlaying, 20000);
+// polling géré par startPolling;
 `;
 
 function buildHTML() {
@@ -385,7 +385,7 @@ html,body{background:var(--paper);color:var(--ink);font-family:'Montserrat',sans
 .hdr{padding:36px 24px 0;display:flex;align-items:flex-end;justify-content:space-between}
 .hdr-my{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:300;font-size:1rem;letter-spacing:.1em;color:var(--smoke);line-height:1}
 .hdr-brand{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:2rem;letter-spacing:.28em;text-transform:uppercase;line-height:1}
-.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px;text-align:right}
+.hdr-by{font-family:'Cormorant Garamond',serif;font-size:1rem;font-style:italic;font-weight:300;color:var(--smoke);letter-spacing:.1em;margin-top:2px;text-align:right;padding-right:4px}
 .hdr-tagline{font-size:.52rem;letter-spacing:.18em;text-transform:uppercase;color:var(--terra);text-align:right;line-height:1.6;max-width:160px}
 .hdr-line{height:1px;background:linear-gradient(90deg,var(--ink) 0%,var(--gold) 60%,transparent 100%);margin:12px 24px 20px}
 .status{display:flex;align-items:center;gap:7px;padding:0 24px 18px;font-size:.58rem;letter-spacing:.2em;text-transform:uppercase;color:var(--smoke)}
